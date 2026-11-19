@@ -4,10 +4,9 @@ import {
   Clipboard, Clock3, FileText, LayoutGrid, ListFilter, Search, Trash2, Users, X,
 } from 'lucide-react'
 import { members, sections } from './seed'
-import {
-  deleteSharedMeeting, fetchSharedStore, replaceSharedMeeting, saveSharedMeeting,
-  sharedStorageEnabled, type Attendance, type Meeting, type Store,
-} from './sharedAttendance'
+type Attendance = 'present' | 'absent'
+type Meeting = { date: string; title: string; attendance: Record<string, Attendance> }
+type Store = { version: 1; meetings: Meeting[] }
 type View = 'register' | 'matrix'
 
 const STORAGE_KEY = 'medenza-27-attendance-v1'
@@ -52,11 +51,7 @@ export default function App() {
   const [filter, setFilter] = useState('All teams')
   const [view, setView] = useState<View>('register')
   const [notice, setNotice] = useState('')
-  const [syncStatus, setSyncStatus] = useState<'local' | 'connecting' | 'connected' | 'error'>(
-    sharedStorageEnabled ? 'connecting' : 'local',
-  )
   const importRef = useRef<HTMLInputElement>(null)
-  const pendingWrites = useRef(0)
 
   useEffect(() => {
     try {
@@ -66,48 +61,6 @@ export default function App() {
       setNotice('Could not save to this browser. Export a backup to protect your data.')
     }
   }, [store])
-
-  useEffect(() => {
-    if (!sharedStorageEnabled) return
-    let cancelled = false
-    const refresh = async (initial: boolean) => {
-      try {
-        const remote = await fetchSharedStore()
-        if (cancelled) return
-        if (initial && remote.meetings.length === 0 && store.meetings.length > 0) {
-          await Promise.all(store.meetings.map(saveSharedMeeting))
-        } else if (pendingWrites.current === 0) {
-          setStore((current) =>
-            JSON.stringify(current.meetings) === JSON.stringify(remote.meetings) ? current : remote,
-          )
-        }
-        setSyncStatus('connected')
-      } catch (error) {
-        console.error('Unable to sync shared attendance.', error)
-        if (!cancelled) setSyncStatus('error')
-      }
-    }
-    void refresh(true)
-    const timer = window.setInterval(() => void refresh(false), 5000)
-    return () => {
-      cancelled = true
-      window.clearInterval(timer)
-    }
-  }, [])
-
-  const persistSharedMeeting = (item: Meeting) => {
-    if (!sharedStorageEnabled) return
-    pendingWrites.current += 1
-    void saveSharedMeeting(item).then(() => {
-      setSyncStatus('connected')
-    }).catch((error: unknown) => {
-      console.error('Unable to save shared attendance.', error)
-      setSyncStatus('error')
-      setNotice('Shared save failed. Check your connection and try again.')
-    }).finally(() => {
-      pendingWrites.current -= 1
-    })
-  }
 
   const meetings = useMemo(() => [...store.meetings].sort((a, b) => b.date.localeCompare(a.date)), [store.meetings])
   const meeting = store.meetings.find((item) => item.date === activeDate)
@@ -121,17 +74,15 @@ export default function App() {
   const absentees = members.filter((member) => activeAttendance[member.id] === 'absent')
 
   const updateMeeting = (date: string, update: (current: Meeting) => Meeting) => {
-    const existing = store.meetings.find((item) => item.date === date)
-    const base = existing ?? { date, title: '', attendance: {} }
-    const changed = update(base)
     setStore((current) => {
-      const hasDate = current.meetings.some((item) => item.date === date)
-      const meetingsNext = hasDate
+      const existing = current.meetings.find((item) => item.date === date)
+      const base = existing ?? { date, title: '', attendance: {} }
+      const changed = update(base)
+      const meetingsNext = existing
         ? current.meetings.map((item) => item.date === date ? changed : item)
         : [...current.meetings, changed]
       return { ...current, meetings: meetingsNext }
     })
-    persistSharedMeeting(changed)
   }
 
   const openDate = (date: string) => {
@@ -155,7 +106,7 @@ export default function App() {
 
   const saveAttendance = () => {
     updateMeeting(activeDate, (current) => ({ ...current, title: titleInput.trim() }))
-    setNotice(sharedStorageEnabled ? 'Attendance saved to the shared register.' : 'Attendance saved on this device.')
+    setNotice('Attendance saved on this device.')
     window.setTimeout(() => setNotice(''), 2600)
   }
 
@@ -209,10 +160,6 @@ export default function App() {
       const merged = new Map(store.meetings.map((item) => [item.date, item]))
       imported.forEach((item) => merged.set(item.date, item))
       setStore({ version: 1, meetings: [...merged.values()] })
-      if (sharedStorageEnabled) {
-        await Promise.all(imported.map(replaceSharedMeeting))
-        if (imported.length) setSyncStatus('connected')
-      }
       if (imported.length) openDate(imported[0].date)
       setNotice(`Imported ${imported.length} meeting${imported.length === 1 ? '' : 's'}.`)
     } catch (error) {
@@ -226,13 +173,6 @@ export default function App() {
   const deleteMeeting = (date: string) => {
     if (!window.confirm(`Delete the meeting on ${dateLabel(date)} and its attendance? This cannot be undone.`)) return
     setStore((current) => ({ ...current, meetings: current.meetings.filter((item) => item.date !== date) }))
-    if (sharedStorageEnabled) {
-      void deleteSharedMeeting(date).then(() => setSyncStatus('connected')).catch((error: unknown) => {
-        console.error('Unable to delete shared meeting.', error)
-        setSyncStatus('error')
-        setNotice('Could not delete the meeting from shared storage.')
-      })
-    }
     if (activeDate === date) {
       setActiveDate(today())
       setNewDate(today())
@@ -268,8 +208,8 @@ export default function App() {
 
       <section className="card meeting-card">
         <div className="card-heading">
-          <div className="section-title"><span className="icon-tile blue"><CalendarDays size={18} /></span><div><h2>Meeting date</h2><p>Create a session or open a saved one</p></div></div>
-          <span className={`saved-count sync-${syncStatus}`}>{syncStatus === 'local' ? 'This device only' : syncStatus === 'connecting' ? 'Connecting…' : syncStatus === 'error' ? 'Sync issue' : 'Shared · live'}{syncStatus !== 'local' && <i />}</span>
+          <div className="section-title"><span className="icon-tile blue"><CalendarDays size={18} /></span><div><h2>Meeting date</h2><p>Saved on this device</p></div></div>
+          <span className="saved-count">{meetings.length} saved</span>
         </div>
         <div className="meeting-controls">
           <label className="field date-field"><span>New / select meeting date</span><input type="date" value={newDate} onChange={(event) => setNewDate(event.target.value)} /></label>
